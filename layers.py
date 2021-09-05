@@ -1,446 +1,202 @@
-import tensorflow.compat.v2 as tf
-
-from keras import backend
-from keras.applications import imagenet_utils
-from keras.engine import training
-from keras.layers import VersionAwareLayers
-from keras.utils import data_utils
-from keras.utils import layer_utils
-from tensorflow.python.platform import tf_logging as logging
-from tensorflow.python.util.tf_export import keras_export
-
-BASE_WEIGHT_PATH = ('https://storage.googleapis.com/tensorflow/'
-                    'keras-applications/mobilenet_v2/')
-layers = None
-
-
-@keras_export('keras.applications.mobilenet_v2.MobileNetV2',
-              'keras.applications.MobileNetV2')
-def MobileNetV2(input_shape=None,
-                alpha=1.0,
-                include_top=True,
-                weights='imagenet',
-                input_tensor=None,
-                pooling=None,
-                classes=1000,
-                classifier_activation='softmax',
-                **kwargs):
-  """Instantiates the MobileNetV2 architecture.
-  MobileNetV2 is very similar to the original MobileNet,
-  except that it uses inverted residual blocks with
-  bottlenecking features. It has a drastically lower
-  parameter count than the original MobileNet.
-  MobileNets support any input size greater
-  than 32 x 32, with larger image sizes
-  offering better performance.
-  Reference:
-  - [MobileNetV2: Inverted Residuals and Linear Bottlenecks](
-      https://arxiv.org/abs/1801.04381) (CVPR 2018)
-  This function returns a Keras image classification model,
-  optionally loaded with weights pre-trained on ImageNet.
-  For image classification use cases, see
-  [this page for detailed examples](
-    https://keras.io/api/applications/#usage-examples-for-image-classification-models).
-  For transfer learning use cases, make sure to read the
-  [guide to transfer learning & fine-tuning](
-    https://keras.io/guides/transfer_learning/).
-  Note: each Keras Application expects a specific kind of input preprocessing.
-  For MobileNetV2, call `tf.keras.applications.mobilenet_v2.preprocess_input`
-  on your inputs before passing them to the model.
-  `mobilenet_v2.preprocess_input` will scale input pixels between -1 and 1.
-  Args:
-    input_shape: Optional shape tuple, to be specified if you would
-      like to use a model with an input image resolution that is not
-      (224, 224, 3).
-      It should have exactly 3 inputs channels (224, 224, 3).
-      You can also omit this option if you would like
-      to infer input_shape from an input_tensor.
-      If you choose to include both input_tensor and input_shape then
-      input_shape will be used if they match, if the shapes
-      do not match then we will throw an error.
-      E.g. `(160, 160, 3)` would be one valid value.
-    alpha: Float between 0 and 1. controls the width of the network.
-      This is known as the width multiplier in the MobileNetV2 paper,
-      but the name is kept for consistency with `applications.MobileNetV1`
-      model in Keras.
-      - If `alpha` < 1.0, proportionally decreases the number
-          of filters in each layer.
-      - If `alpha` > 1.0, proportionally increases the number
-          of filters in each layer.
-      - If `alpha` = 1.0, default number of filters from the paper
-          are used at each layer.
-    include_top: Boolean, whether to include the fully-connected
-      layer at the top of the network. Defaults to `True`.
-    weights: String, one of `None` (random initialization),
-      'imagenet' (pre-training on ImageNet),
-      or the path to the weights file to be loaded.
-    input_tensor: Optional Keras tensor (i.e. output of
-      `layers.Input()`)
-      to use as image input for the model.
-    pooling: String, optional pooling mode for feature extraction
-      when `include_top` is `False`.
-      - `None` means that the output of the model
-          will be the 4D tensor output of the
-          last convolutional block.
-      - `avg` means that global average pooling
-          will be applied to the output of the
-          last convolutional block, and thus
-          the output of the model will be a
-          2D tensor.
-      - `max` means that global max pooling will
-          be applied.
-    classes: Integer, optional number of classes to classify images
-      into, only to be specified if `include_top` is True, and
-      if no `weights` argument is specified.
-    classifier_activation: A `str` or callable. The activation function to use
-      on the "top" layer. Ignored unless `include_top=True`. Set
-      `classifier_activation=None` to return the logits of the "top" layer.
-      When loading pretrained weights, `classifier_activation` can only
-      be `None` or `"softmax"`.
-    **kwargs: For backwards compatibility only.
-  Returns:
-    A `keras.Model` instance.
-  """
-  global layers
-  if 'layers' in kwargs:
-    layers = kwargs.pop('layers')
-  else:
-    layers = VersionAwareLayers()
-  if kwargs:
-    raise ValueError('Unknown argument(s): %s' % (kwargs,))
-  if not (weights in {'imagenet', None} or tf.io.gfile.exists(weights)):
-    raise ValueError('The `weights` argument should be either '
-                     '`None` (random initialization), `imagenet` '
-                     '(pre-training on ImageNet), '
-                     'or the path to the weights file to be loaded.')
-
-  if weights == 'imagenet' and include_top and classes != 1000:
-    raise ValueError('If using `weights` as `"imagenet"` with `include_top` '
-                     'as true, `classes` should be 1000')
-
-  # Determine proper input shape and default size.
-  # If both input_shape and input_tensor are used, they should match
-  if input_shape is not None and input_tensor is not None:
-    try:
-      is_input_t_tensor = backend.is_keras_tensor(input_tensor)
-    except ValueError:
-      try:
-        is_input_t_tensor = backend.is_keras_tensor(
-            layer_utils.get_source_inputs(input_tensor))
-      except ValueError:
-        raise ValueError('input_tensor: ', input_tensor,
-                         'is not type input_tensor')
-    if is_input_t_tensor:
-      if backend.image_data_format() == 'channels_first':
-        if backend.int_shape(input_tensor)[1] != input_shape[1]:
-          raise ValueError('input_shape: ', input_shape, 'and input_tensor: ',
-                           input_tensor,
-                           'do not meet the same shape requirements')
-      else:
-        if backend.int_shape(input_tensor)[2] != input_shape[1]:
-          raise ValueError('input_shape: ', input_shape, 'and input_tensor: ',
-                           input_tensor,
-                           'do not meet the same shape requirements')
-    else:
-      raise ValueError('input_tensor specified: ', input_tensor,
-                       'is not a keras tensor')
-
-  # If input_shape is None, infer shape from input_tensor
-  if input_shape is None and input_tensor is not None:
-
-    try:
-      backend.is_keras_tensor(input_tensor)
-    except ValueError:
-      raise ValueError('input_tensor: ', input_tensor, 'is type: ',
-                       type(input_tensor), 'which is not a valid type')
-
-    if input_shape is None and not backend.is_keras_tensor(input_tensor):
-      default_size = 224
-    elif input_shape is None and backend.is_keras_tensor(input_tensor):
-      if backend.image_data_format() == 'channels_first':
-        rows = backend.int_shape(input_tensor)[2]
-        cols = backend.int_shape(input_tensor)[3]
-      else:
-        rows = backend.int_shape(input_tensor)[1]
-        cols = backend.int_shape(input_tensor)[2]
-
-      if rows == cols and rows in [96, 128, 160, 192, 224]:
-        default_size = rows
-      else:
-        default_size = 224
-
-  # If input_shape is None and no input_tensor
-  elif input_shape is None:
-    default_size = 224
-
-  # If input_shape is not None, assume default size
-  else:
-    if backend.image_data_format() == 'channels_first':
-      rows = input_shape[1]
-      cols = input_shape[2]
-    else:
-      rows = input_shape[0]
-      cols = input_shape[1]
-
-    if rows == cols and rows in [96, 128, 160, 192, 224]:
-      default_size = rows
-    else:
-      default_size = 224
-
-  input_shape = imagenet_utils.obtain_input_shape(
-      input_shape,
-      default_size=default_size,
-      min_size=32,
-      data_format=backend.image_data_format(),
-      require_flatten=include_top,
-      weights=weights)
-
-  if backend.image_data_format() == 'channels_last':
-    row_axis, col_axis = (0, 1)
-  else:
-    row_axis, col_axis = (1, 2)
-  rows = input_shape[row_axis]
-  cols = input_shape[col_axis]
-
-  if weights == 'imagenet':
-    if alpha not in [0.35, 0.50, 0.75, 1.0, 1.3, 1.4]:
-      raise ValueError('If imagenet weights are being loaded, '
-                       'alpha can be one of `0.35`, `0.50`, `0.75`, '
-                       '`1.0`, `1.3` or `1.4` only.')
-
-    if rows != cols or rows not in [96, 128, 160, 192, 224]:
-      rows = 224
-      logging.warning('`input_shape` is undefined or non-square, '
-                      'or `rows` is not in [96, 128, 160, 192, 224].'
-                      ' Weights for input shape (224, 224) will be'
-                      ' loaded as the default.')
-
-  if input_tensor is None:
-    img_input = layers.Input(shape=input_shape)
-  else:
-    if not backend.is_keras_tensor(input_tensor):
-      img_input = layers.Input(tensor=input_tensor, shape=input_shape)
-    else:
-      img_input = input_tensor
-
-  channel_axis = 1 if backend.image_data_format() == 'channels_first' else -1
-
-  first_block_filters = _make_divisible(32 * alpha, 8)
-  x = layers.Conv2D(
-      first_block_filters,
-      kernel_size=3,
-      strides=(2, 2),
-      padding='same',
-      use_bias=False,
-      name='Conv1')(img_input)
-  x = layers.BatchNormalization(
-      axis=channel_axis, epsilon=1e-3, momentum=0.999, name='bn_Conv1')(
-          x)
-  x = layers.ReLU(6., name='Conv1_relu')(x)
-
-  x = _inverted_res_block(
-      x, filters=16, alpha=alpha, stride=1, expansion=1, block_id=0)
-
-  x = _inverted_res_block(
-      x, filters=24, alpha=alpha, stride=2, expansion=6, block_id=1)
-  x = _inverted_res_block(
-      x, filters=24, alpha=alpha, stride=1, expansion=6, block_id=2)
-
-  x = _inverted_res_block(
-      x, filters=32, alpha=alpha, stride=2, expansion=6, block_id=3)
-  x = _inverted_res_block(
-      x, filters=32, alpha=alpha, stride=1, expansion=6, block_id=4)
-  x = _inverted_res_block(
-      x, filters=32, alpha=alpha, stride=1, expansion=6, block_id=5)
-
-  x = _inverted_res_block(
-      x, filters=64, alpha=alpha, stride=2, expansion=6, block_id=6)
-  x = _inverted_res_block(
-      x, filters=64, alpha=alpha, stride=1, expansion=6, block_id=7)
-  x = _inverted_res_block(
-      x, filters=64, alpha=alpha, stride=1, expansion=6, block_id=8)
-  x = _inverted_res_block(
-      x, filters=64, alpha=alpha, stride=1, expansion=6, block_id=9)
-
-  x = _inverted_res_block(
-      x, filters=96, alpha=alpha, stride=1, expansion=6, block_id=10)
-  x = _inverted_res_block(
-      x, filters=96, alpha=alpha, stride=1, expansion=6, block_id=11)
-  x = _inverted_res_block(
-      x, filters=96, alpha=alpha, stride=1, expansion=6, block_id=12)
-
-  x = _inverted_res_block(
-      x, filters=160, alpha=alpha, stride=2, expansion=6, block_id=13)
-  x = _inverted_res_block(
-      x, filters=160, alpha=alpha, stride=1, expansion=6, block_id=14)
-  x = _inverted_res_block(
-      x, filters=160, alpha=alpha, stride=1, expansion=6, block_id=15)
-
-  x = _inverted_res_block(
-      x, filters=320, alpha=alpha, stride=1, expansion=6, block_id=16)
-
-  # no alpha applied to last conv as stated in the paper:
-  # if the width multiplier is greater than 1 we
-  # increase the number of output channels
-  if alpha > 1.0:
-    last_block_filters = _make_divisible(1280 * alpha, 8)
-  else:
-    last_block_filters = 1280
-
-  x = layers.Conv2D(
-      last_block_filters, kernel_size=1, use_bias=False, name='Conv_1')(
-          x)
-  x = layers.BatchNormalization(
-      axis=channel_axis, epsilon=1e-3, momentum=0.999, name='Conv_1_bn')(
-          x)
-  x = layers.ReLU(6., name='out_relu')(x)
-
-  if include_top:
-    x = layers.GlobalAveragePooling2D()(x)
-    imagenet_utils.validate_activation(classifier_activation, weights)
-    x = layers.Dense(classes, activation=classifier_activation,
-                     name='predictions')(x)
-
-  else:
-    if pooling == 'avg':
-      x = layers.GlobalAveragePooling2D()(x)
-    elif pooling == 'max':
-      x = layers.GlobalMaxPooling2D()(x)
-
-  # Ensure that the model takes into account
-  # any potential predecessors of `input_tensor`.
-  if input_tensor is not None:
-    inputs = layer_utils.get_source_inputs(input_tensor)
-  else:
-    inputs = img_input
-
-  # Create model.
-  model = training.Model(inputs, x, name='mobilenetv2_%0.2f_%s' % (alpha, rows))
-
-  # Load weights.
-  if weights == 'imagenet':
-    if include_top:
-      model_name = ('mobilenet_v2_weights_tf_dim_ordering_tf_kernels_' +
-                    str(float(alpha)) + '_' + str(rows) + '.h5')
-      weight_path = BASE_WEIGHT_PATH + model_name
-      weights_path = data_utils.get_file(
-          model_name, weight_path, cache_subdir='models')
-    else:
-      model_name = ('mobilenet_v2_weights_tf_dim_ordering_tf_kernels_' +
-                    str(float(alpha)) + '_' + str(rows) + '_no_top' + '.h5')
-      weight_path = BASE_WEIGHT_PATH + model_name
-      weights_path = data_utils.get_file(
-          model_name, weight_path, cache_subdir='models')
-    model.load_weights(weights_path)
-  elif weights is not None:
-    model.load_weights(weights)
-
-  return model
+import os
+import numpy as np
+from tensorflow.keras import layers
+from tensorflow import keras 
+import tensorflow as tf
+import numpy.matlib
+from PIL import Image
+from keras import backend as K
+from scipy.special import softmax
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import bottleneck
+import tensorflow as tf
+import tensorflow.keras.layers as layers
+from tensorflow.keras import Sequential
 
 
-def _inverted_res_block(inputs, expansion, stride, alpha, filters, block_id):
-  """Inverted ResNet block."""
-  channel_axis = 1 if backend.image_data_format() == 'channels_first' else -1
 
-  in_channels = backend.int_shape(inputs)[channel_axis]
-  pointwise_conv_filters = int(filters * alpha)
-  pointwise_filters = _make_divisible(pointwise_conv_filters, 8)
-  x = inputs
-  prefix = 'block_{}_'.format(block_id)
+class Bottleneck(keras.Model):
+  def __init__(
+      self,
+      expansion,
+      stride,
+      block_id,
+      filters,
+      alpha=1,
+      ):
+    super(Bottleneck,self).__init__(name = "Bottleneck_" + block_id)
+    self.stride = stride
+    self.expansion = expansion
+    self.alpha = alpha
+    self.output_channels = self.alpha * filters
+    self.out = None # there was some problem with the eager execution
 
-  if block_id:
-    # Expand
-    x = layers.Conv2D(
-        expansion * in_channels,
-        kernel_size=1,
+    prefix =  'Bottleneck_{}_'.format(block_id)
+    self.prefix = prefix
+    # expansion
+    self.expand_BN = layers.BatchNormalization(name = prefix + 'expand_BN')
+    self.expand_ReLU = layers.ReLU(max_value=6, name = prefix + 'expand_ReLU')
+
+    #conv
+    self.Conv = layers.DepthwiseConv2D(
+        kernel_size = 3,
         padding='same',
-        use_bias=False,
-        activation=None,
-        name=prefix + 'expand')(
-            x)
-    x = layers.BatchNormalization(
-        axis=channel_axis,
-        epsilon=1e-3,
-        momentum=0.999,
-        name=prefix + 'expand_BN')(
-            x)
-    x = layers.ReLU(6., name=prefix + 'expand_relu')(x)
-  else:
-    prefix = 'expanded_conv_'
+        strides = self.stride,
+        use_bias = False,
+        name = prefix + 'conv')
+    self.Conv_BN = layers.BatchNormalization(name = prefix + 'conv_BN')
+    self.Conv_ReLU = layers.ReLU(max_value=6, name = prefix + 'conv_ReLU')
 
-  # Depthwise
-  if stride == 2:
-    x = layers.ZeroPadding2D(
-        padding=imagenet_utils.correct_pad(x, 3),
-        name=prefix + 'pad')(x)
-  x = layers.DepthwiseConv2D(
-      kernel_size=3,
-      strides=stride,
-      activation=None,
-      use_bias=False,
-      padding='same' if stride == 1 else 'valid',
-      name=prefix + 'depthwise')(
-          x)
-  x = layers.BatchNormalization(
-      axis=channel_axis,
-      epsilon=1e-3,
-      momentum=0.999,
-      name=prefix + 'depthwise_BN')(
-          x)
+    #project
+    self.project = layers.Conv2D(
+        filters = self.output_channels,
+        kernel_size = 1,
+        use_bias = False,
+        name = 'contract')
+    self.project_BN = layers.BatchNormalization(name = prefix + 'contract_BN')
 
-  x = layers.ReLU(6., name=prefix + 'depthwise_relu')(x)
+    # dimensions need to be the same for residual connection
+    self.residual = layers.Add(name=prefix + 'residual')
+  
+  def build(self, input_shape):
+    self.d = input_shape[-1]
+    
+    self.expand = layers.Conv2D(
+        filters = self.expansion*self.d,
+        kernel_size = 1,
+        use_bias = False,
+        name = self.prefix+'expand')
 
-  # Project
-  x = layers.Conv2D(
-      pointwise_filters,
-      kernel_size=1,
-      padding='same',
-      use_bias=False,
-      activation=None,
-      name=prefix + 'project')(
-          x)
-  x = layers.BatchNormalization(
-      axis=channel_axis,
-      epsilon=1e-3,
-      momentum=0.999,
-      name=prefix + 'project_BN')(
-          x)
+      
+  def call(self, inputs):
 
-  if in_channels == pointwise_filters and stride == 1:
-    return layers.Add(name=prefix + 'add')([inputs, x])
-  return x
+    x = self.expand(inputs)
+    x = self.expand_BN(x)
+    x = self.expand_ReLU(x)
+    self.out = x
+    
+    x = self.Conv(x)
+    x = self.Conv_BN(x)
+    x = self.Conv_ReLU(x)
 
+    x = self.project(x)
+    x = self.project_BN(x)
 
-def _make_divisible(v, divisor, min_value=None):
-  if min_value is None:
-    min_value = divisor
-  new_v = max(min_value, int(v + divisor / 2) // divisor * divisor)
-  # Make sure that round down does not go down by more than 10%.
-  if new_v < 0.9 * v:
-    new_v += divisor
-  return new_v
+    if self.output_channels == self.d and self.stride == 1:
+      x = self.residual([inputs,x])
 
+    return x
 
-@keras_export('keras.applications.mobilenet_v2.preprocess_input')
-def preprocess_input(x, data_format=None):
-  return imagenet_utils.preprocess_input(x, data_format=data_format, mode='tf')
+  def model(self):
+      x = keras.Input(shape=(28,28,3))
+      return keras.Model(inputs=[x], outputs=self.call(x))
+    
+    
+    
+    
+    
+#using the architecture mentioned in the paper
+class MobileNetv2(keras.Model):
+  def __init__(self, k = 11):
+    super(MobileNetv2,self).__init__()
+    self.conv_inp = layers.Conv2D(
+        filters = 32,
+        kernel_size = 3,
+        strides = (2,2),
+        padding='valid',
+        use_bias = False,
+        name = 'conv'
+    )
+    self.k = k    
 
+    self.pad = layers.ZeroPadding2D(padding=2,name='pad')
+    self.BN = layers.BatchNormalization(name='BN')
+    self.ReLU = layers.ReLU(max_value = 6, name = 'ReLU')
+    
+    self.B1_1 = Bottleneck(expansion = 1, filters = 16, stride = 1, block_id = 'B1_1')
 
-@keras_export('keras.applications.mobilenet_v2.decode_predictions')
-def decode_predictions(preds, top=5):
-  return imagenet_utils.decode_predictions(preds, top=top)
+    self.B2_1 = Bottleneck(expansion = 6, filters = 24, stride = 2, block_id = 'B2_1')
+    self.B2_2 = Bottleneck(expansion = 6, filters = 24, stride = 1, block_id = 'B2_2')
 
+    self.B3_1 = Bottleneck(expansion = 6, filters = 32, stride = 2, block_id = 'B3_1')
+    self.B3_2 = Bottleneck(expansion = 6, filters = 32, stride = 1, block_id = 'B3_2')
+    self.B3_3 = Bottleneck(expansion = 6, filters = 32, stride = 1, block_id = 'B3_3')
 
-preprocess_input.__doc__ = imagenet_utils.PREPROCESS_INPUT_DOC.format(
-    mode='',
-    ret=imagenet_utils.PREPROCESS_INPUT_RET_DOC_TF,
-    error=imagenet_utils.PREPROCESS_INPUT_ERROR_DOC)
-decode_predictions.__doc__ = imagenet_utils.decode_predictions.__doc__
+    self.B4_1 = Bottleneck(expansion = 6, filters = 64, stride = 2, block_id = 'B4_1')
+    self.B4_2 = Bottleneck(expansion = 6, filters = 64, stride = 1, block_id = 'B4_2')
+    self.B4_3 = Bottleneck(expansion = 6, filters = 64, stride = 1, block_id = 'B4_3')
+    self.B4_4 = Bottleneck(expansion = 6, filters = 64, stride = 1, block_id = 'B4_4')
 
+    self.B5_1 = Bottleneck(expansion = 6, filters = 96, stride = 1, block_id = 'B5_1')
+    self.B5_2 = Bottleneck(expansion = 6, filters = 96, stride = 1, block_id = 'B5_2')
+    self.B5_3 = Bottleneck(expansion = 6, filters = 96, stride = 1, block_id = 'B5_3')
 
-# import tensorflow as tf
-# import tensorflow.keras.layers as layers
-# from tensorflow.keras import Sequential
+    self.B6_1 = Bottleneck(expansion = 6, filters = 160, stride = 2, block_id = 'B6_1')
+    self.B6_2 = Bottleneck(expansion = 6, filters = 160, stride = 1, block_id = 'B6_2')
+    self.B6_3 = Bottleneck(expansion = 6, filters = 160, stride = 1, block_id = 'B6_3')
+
+    self.B7_1 = Bottleneck(expansion = 6, filters = 320, stride = 1, block_id = 'B7_1')
+
+    self.conv_out = layers.Conv2D(
+        filters = 1280,
+        kernel_size = 1,
+        strides = (1,1),
+        use_bias = False,
+        name = 'conv_out'
+    )
+    self.avgpool = layers.AveragePooling2D(
+        pool_size = (7,7),
+        name='avg_pool'
+        )
+    
+    self.conv_seg = layers.Conv2D(
+        filters = self.k,
+        kernel_size = 1,
+        strides = (1,1),
+        use_bias = False,
+        name = 'conv_seg'
+    )
+
+  def call(self, inputs):
+    x = self.conv_inp(inputs)
+    x = self.BN(x)
+    x = self.ReLU(x)
+
+    x = self.B1_1(x)
+    x = self.B2_1(x)
+    x = self.B2_2(x)
+
+    x = self.B3_1(x)
+    x = self.B3_2(x)
+    x = self.B3_3(x)
+    
+    x = self.B4_1(x)
+    x = self.B4_2(x)
+    x = self.B4_3(x)
+    x = self.B4_4(x)
+    
+    x = self.B5_1(x)
+    x = self.B5_2(x)
+    x = self.B5_3(x)
+    
+    x = self.B6_1(x)
+    x = self.B6_2(x)
+    x = self.B6_3(x)
+    
+    x = self.B7_1(x)
+
+    x = self.conv_out(x)
+    x = self.avgpool(x)
+    c4 = self.conv_seg(x)
+
+    return c4
+
+  def model(self):
+      x = keras.Input(shape=(224,224,3))
+
+      return keras.Model(inputs=x, outputs=self.call(x))
+
 
 
 # def create_vgg16_layers():
@@ -495,77 +251,77 @@ decode_predictions.__doc__ = imagenet_utils.decode_predictions.__doc__
 #     return vgg16_conv4, vgg16_conv7
 
 
-# def create_extra_layers():
-#     """ Create extra layers
-#         8th to 11th blocks
-#     """
-#     extra_layers = [
-#         # 8th block output shape: B, 512, 10, 10
-#         Sequential([
-#             layers.Conv2D(256, 1, activation='relu'),
-#             layers.Conv2D(512, 3, strides=2, padding='same',
-#                           activation='relu'),
-#         ]),
-#         # 9th block output shape: B, 256, 5, 5
-#         Sequential([
-#             layers.Conv2D(128, 1, activation='relu'),
-#             layers.Conv2D(256, 3, strides=2, padding='same',
-#                           activation='relu'),
-#         ]),
-#         # 10th block output shape: B, 256, 3, 3
-#         Sequential([
-#             layers.Conv2D(128, 1, activation='relu'),
-#             layers.Conv2D(256, 3, activation='relu'),
-#         ]),
-#         # 11th block output shape: B, 256, 1, 1
-#         Sequential([
-#             layers.Conv2D(128, 1, activation='relu'),
-#             layers.Conv2D(256, 3, activation='relu'),
-#         ]),
-#         # 12th block output shape: B, 256, 1, 1
-#         Sequential([
-#             layers.Conv2D(128, 1, activation='relu'),
-#             layers.Conv2D(256, 4, activation='relu'),
-#         ])
-#     ]
+def create_extra_layers():
+    """ Create extra layers
+        8th to 11th blocks
+    """
+    extra_layers = [
+        # 8th block output shape: B, 512, 10, 10
+        Sequential([
+            layers.Conv2D(256, 1, activation='relu'),
+            layers.Conv2D(512, 3, strides=2, padding='same',
+                          activation='relu'),
+        ]),
+        # 9th block output shape: B, 256, 5, 5
+        Sequential([
+            layers.Conv2D(128, 1, activation='relu'),
+            layers.Conv2D(256, 3, strides=2, padding='same',
+                          activation='relu'),
+        ]),
+        # 10th block output shape: B, 256, 3, 3
+        Sequential([
+            layers.Conv2D(128, 1, activation='relu'),
+            layers.Conv2D(256, 3, activation='relu'),
+        ]),
+        # 11th block output shape: B, 256, 1, 1
+        Sequential([
+            layers.Conv2D(128, 1, activation='relu'),
+            layers.Conv2D(256, 3, activation='relu'),
+        ]),
+        # 12th block output shape: B, 256, 1, 1
+        Sequential([
+            layers.Conv2D(128, 1, activation='relu'),
+            layers.Conv2D(256, 4, activation='relu'),
+        ])
+    ]
 
-#     return extra_layers
-
-
-# def create_conf_head_layers(num_classes):
-#     """ Create layers for classification
-#     """
-#     conf_head_layers = [
-#         layers.Conv2D(4 * num_classes, kernel_size=3,
-#                       padding='same'),  # for 4th block
-#         layers.Conv2D(6 * num_classes, kernel_size=3,
-#                       padding='same'),  # for 7th block
-#         layers.Conv2D(6 * num_classes, kernel_size=3,
-#                       padding='same'),  # for 8th block
-#         layers.Conv2D(6 * num_classes, kernel_size=3,
-#                       padding='same'),  # for 9th block
-#         layers.Conv2D(4 * num_classes, kernel_size=3,
-#                       padding='same'),  # for 10th block
-#         layers.Conv2D(4 * num_classes, kernel_size=3,
-#                       padding='same'),  # for 11th block
-#         layers.Conv2D(4 * num_classes, kernel_size=1)  # for 12th block
-#     ]
-
-#     return conf_head_layers
+    return extra_layers
 
 
-# def create_loc_head_layers():
-#     """ Create layers for regression
-#     """
-#     loc_head_layers = [
-#         layers.Conv2D(4 * 4, kernel_size=3, padding='same'),
-#         layers.Conv2D(6 * 4, kernel_size=3, padding='same'),
-#         layers.Conv2D(6 * 4, kernel_size=3, padding='same'),
-#         layers.Conv2D(6 * 4, kernel_size=3, padding='same'),
-#         layers.Conv2D(4 * 4, kernel_size=3, padding='same'),
-#         layers.Conv2D(4 * 4, kernel_size=3, padding='same'),
-#         layers.Conv2D(4 * 4, kernel_size=1)
-#     ]
+def create_conf_head_layers(num_classes):
+    """ Create layers for classification
+    """
+    conf_head_layers = [
+        layers.Conv2D(4 * num_classes, kernel_size=3,
+                      padding='same'),  # for 4th block
+        layers.Conv2D(6 * num_classes, kernel_size=3,
+                      padding='same'),  # for 7th block
+        layers.Conv2D(6 * num_classes, kernel_size=3,
+                      padding='same'),  # for 8th block
+        layers.Conv2D(6 * num_classes, kernel_size=3,
+                      padding='same'),  # for 9th block
+        layers.Conv2D(4 * num_classes, kernel_size=3,
+                      padding='same'),  # for 10th block
+        layers.Conv2D(4 * num_classes, kernel_size=3,
+                      padding='same'),  # for 11th block
+        layers.Conv2D(4 * num_classes, kernel_size=1)  # for 12th block
+    ]
 
-#     return loc_head_layers
+    return conf_head_layers
+
+
+def create_loc_head_layers():
+    """ Create layers for regression
+    """
+    loc_head_layers = [
+        layers.Conv2D(4 * 4, kernel_size=3, padding='same'),
+        layers.Conv2D(6 * 4, kernel_size=3, padding='same'),
+        layers.Conv2D(6 * 4, kernel_size=3, padding='same'),
+        layers.Conv2D(6 * 4, kernel_size=3, padding='same'),
+        layers.Conv2D(4 * 4, kernel_size=3, padding='same'),
+        layers.Conv2D(4 * 4, kernel_size=3, padding='same'),
+        layers.Conv2D(4 * 4, kernel_size=1)
+    ]
+
+    return loc_head_layers
 
